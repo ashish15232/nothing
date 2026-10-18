@@ -1,46 +1,35 @@
-name: AvicaRDP
+name: probe
+
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 */6 * * *'
 
 jobs:
-  build:
-    name: Start Building...
+  probe:
     runs-on: windows-latest
-    timeout-minutes: 350
+    timeout-minutes: 60
 
     steps:
-      - name: Direct Avica Setup
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install deps
         run: |
-          Write-Host "Starting Avica setup..." -ForegroundColor Green
-          Invoke-WebRequest -Uri "https://gitlab.com/userup908/my-rdp/-/raw/main/setup.py" -OutFile "setup.py"
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade pyautogui pillow pyscreeze requests psutil
+          python -c "import PIL, pyscreeze, pyautogui, psutil; print('PIL', PIL.__version__, '| pyautogui ok')"
+
+      - name: Download Avica
+        run: |
           Invoke-WebRequest -Uri "https://download.avica.com/AvicaLite_v8.0.8.9.exe" -OutFile "Avica_setup.exe"
+          Get-Item Avica_setup.exe | Select-Object Name, Length
 
-          python.exe -m pip install requests pyautogui --quiet
+      - name: Run probe
+        run: python probe.py
 
-          net user runneradmin TheDisa1a
-
-          Start-Process "Avica_setup.exe"
-          Start-Sleep -Seconds 5
-          python setup.py
-
-          Write-Host "Setup finished - look for the gofile link above" -ForegroundColor Green
-
-      - name: Keep Session Alive And Re-Publish Screen
-        run: |
-          @'
-          import time, requests, pyautogui
-          end = time.time() + 19000
-          while time.time() < end:
-              try:
-                  pyautogui.screenshot().save("shot.png")
-                  with open("shot.png", "rb") as f:
-                      r = requests.post("https://store1.gofile.io/uploadFile", files={"file": f})
-                  if r.json().get("status") == "ok":
-                      print("NEW SCREENSHOT:", r.json()["data"]["downloadPage"], flush=True)
-              except Exception as e:
-                  print("upload failed:", e, flush=True)
-              time.sleep(1200)
-          '@ | Set-Content -Encoding UTF8 keepalive.py
-          python keepalive.py
+      - name: Upload screenshots as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: "*.png"
+          if-no-files-found: warn
