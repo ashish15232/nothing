@@ -1,0 +1,201 @@
+name: probe2
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe2:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade pyautogui pillow pyscreeze requests psutil pywinauto comtypes
+          python -c "import pyautogui, pywinauto, PIL; print('deps ok, PIL', PIL.__version__)"
+
+      - name: Download Avica
+        run: |
+          Invoke-WebRequest -Uri "https://download.avica.com/AvicaLite_v8.0.8.9.exe" -OutFile "Avica_setup.exe"
+          Get-Item Avica_setup.exe | Select-Object Name, Length
+
+      - name: Probe install with keyboard and read UI
+        shell: python
+        run: |
+          import glob, os, subprocess, time
+          import requests, pyautogui
+
+          def shot(tag):
+              n = f"{tag}.png"
+              try:
+                  pyautogui.screenshot().save(n)
+              except Exception as e:
+                  print("SHOT", tag, "SCREENSHOT FAILED", repr(e), flush=True)
+                  return
+              try:
+                  with open(n, "rb") as f:
+                      r = requests.post("https://store1.gofile.io/uploadFile", files={"file": f}, timeout=120)
+                  j = r.json()
+                  print("SHOT", tag, ":", j.get("data", {}).get("downloadPage", j), flush=True)
+              except Exception as e:
+                  print("SHOT", tag, "UPLOAD FAILED", repr(e), flush=True)
+
+          def kill(name):
+              p = subprocess.run(["taskkill", "/F", "/IM", name], capture_output=True, text=True)
+              print("kill", name, "rc", p.returncode, (p.stdout or "").strip()[:120], flush=True)
+
+          def find_avica():
+              hits = []
+              for root in (r"C:\Program Files", r"C:\Program Files (x86)", os.path.expanduser(r"~\AppData")):
+                  if not os.path.isdir(root):
+                      continue
+                  base = root.count(os.sep)
+                  for dp, dn, fn in os.walk(root):
+                      if dp.count(os.sep) - base > 3:
+                          dn[:] = []
+                          continue
+                      for f in fn:
+                          if f.lower().endswith(".exe") and "avica" in f.lower():
+                              hits.append(os.path.join(dp, f))
+              return sorted(set(hits))
+
+          def windows():
+              try:
+                  from pywinauto import Desktop
+                  out = []
+                  for w in Desktop(backend="uia").windows():
+                      try:
+                          t = (w.window_text() or "").strip()
+                      except Exception:
+                          t = ""
+                      if t:
+                          out.append(t)
+                  return out
+              except Exception as e:
+                  return [f"ENUM FAIL {e!r}"]
+
+          def drive():
+              from pywinauto import Desktop
+              names = ["Next >", "Next", "&Next", "Install", "&Install", "I &accept the agreement",
+                       "I accept the agreement", "Accept", "Agree", "Yes", "OK", "&Finish", "Finish"]
+              d = Desktop(backend="uia")
+              for r in range(14):
+                  time.sleep(4)
+                  acted = False
+                  for w in d.windows():
+                      try:
+                          title = w.window_text() or ""
+                      except Exception:
+                          continue
+                      if not title:
+                          continue
+                      for nm in names:
+                          try:
+                              b = w.child_window(title=nm, control_type="Button")
+                              if b.exists(timeout=0.8):
+                                  print(f"  [{r}] click {nm!r} in {title!r}", flush=True)
+                                  b.click_input()
+                                  acted = True
+                                  break
+                          except Exception:
+                              pass
+                      if acted:
+                          break
+                  if not acted:
+                      try:
+                          pyautogui.press("enter")
+                          print(f"  [{r}] sent ENTER", flush=True)
+                      except Exception as e:
+                          print(f"  [{r}] enter failed {e!r}", flush=True)
+                  got = find_avica()
+                  if got:
+                      print("  INSTALLED:", got, flush=True)
+                      return got
+              return find_avica()
+
+          def dump_ui(tag, timeout=45):
+              from pywinauto import Desktop
+              end = time.time() + timeout
+              while time.time() < end:
+                  for w in Desktop(backend="uia").windows():
+                      try:
+                          title = w.window_text() or ""
+                      except Exception:
+                          continue
+                      if "avica" not in title.lower():
+                          continue
+                      print(f"UI[{tag}] window={title!r}", flush=True)
+                      try:
+                          for c in w.descendants():
+                              try:
+                                  t = c.window_text()
+                                  ct = c.element_info.control_type
+                              except Exception:
+                                  continue
+                              if t and t.strip():
+                                  print(f"    {ct}: {t!r}", flush=True)
+                      except Exception as e:
+                          print("    dump failed", repr(e), flush=True)
+                      return True
+                  time.sleep(3)
+              print(f"UI[{tag}] no avica window", flush=True)
+              return False
+
+          print("=== step 0: clear stuck installers ===", flush=True)
+          kill("Avica_setup.exe")
+          kill("Avica.exe")
+          time.sleep(2)
+
+          print("=== step 1: launch installer ===", flush=True)
+          exe = os.path.abspath("Avica_setup.exe")
+          print("installer", exe, os.path.getsize(exe), flush=True)
+          shot("p2-01-before")
+          subprocess.Popen([exe])
+          time.sleep(18)
+          print("windows after launch:", windows(), flush=True)
+          shot("p2-02-installer-window")
+
+          print("=== step 2: drive dialogs with keyboard ===", flush=True)
+          cands = drive()
+          print("candidates after drive:", cands, flush=True)
+          shot("p2-03-after-drive")
+
+          if not cands:
+              print("=== step 2b: enumerate open dialogs for evidence ===", flush=True)
+              print("windows now:", windows(), flush=True)
+              ps = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Avica_setup.exe"], capture_output=True, text=True)
+              print((ps.stdout or "")[:600], flush=True)
+
+          print("=== step 3: launch and dump UI ===", flush=True)
+          if cands:
+              tgt = cands[0]
+              for c in cands:
+                  if c.lower().endswith("avica.exe"):
+                      tgt = c
+                      break
+              print("launching", tgt, flush=True)
+              try:
+                  subprocess.Popen([tgt])
+              except Exception as e:
+                  print("launch failed", repr(e), flush=True)
+              time.sleep(25)
+              print("windows:", windows(), flush=True)
+              dump_ui("launched")
+              shot("p2-04-avica-window")
+          else:
+              print("nothing installed - skipping launch", flush=True)
+
+          shot("p2-05-final")
+          print("DONE", flush=True)
+
+      - name: Upload screenshots as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots2
+          path: "*.png"
+          if-no-files-found: warn
